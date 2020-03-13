@@ -1,0 +1,761 @@
+---
+- name: AI DevBox Installation
+  hosts: 127.0.0.1
+  become: yes
+
+  vars:
+    # Dont' forget to pass to the ansible playbook command the folowing environment variables as parameters:
+    #  -e "logname=$(logname)" -e "proxyhost=$PROXY_HOST" -e "proxyport=$PROXY_PORT"
+    # or
+    # define their default values hereafter
+    user: "{{ logname | default('xxx') }}"       # Default user logname to configure
+    proxy_host: "{{ proxyhost | default('') }}"  # Leave empty default value for no proxy
+    proxy_port: "{{ proxyport | default('') }}"  # Leave empty default value for no proxy
+
+    # Development Tools to setup
+    install_conda: true
+    install_pypy: true
+    install_vs_code: true
+    install_sublime_text: true
+    install_pycharm_pro: true
+    pycharm_version: "2019.3.3"
+
+    # Conda configuration
+    conda_python_version: "3.7"
+    conda_env_name: "conda-ai"
+    conda_packages: "pip pylint scipy numpy scikit-learn matplotlib pandas six cython"
+
+    # PyPy configuration
+    pypy_base_url: "https://bitbucket.org/pypy/pypy/downloads"
+    pypy_file: "pypy3.6-v7.3.0-linux64.tar.bz2"
+    pypy_sha256: "d3d549e8f43de820ac3385b698b83fa59b4d7dd6cf3fe34c115f731e26ad8856  pypy3.6-v7.3.0-linux64.tar.bz2"
+
+    # Customize  Window Manager configuration
+    customize_congfiguration: true
+    # Default Custom Wallpaper (MANUALLY put the images in ~./Pictures)
+    # Custom wallpaper by HonooNoKarite https://www.deviantart.com/honoonokarite/art/Wallpaper-Ubuntu-Widescreen-167876024
+    custom_wallpaper: 'ubuntu_by_honoonokarite.png'
+
+
+  tasks:
+
+# -----------------------------------
+#           Sanity Check
+# -----------------------------------
+  - name: Check the Ansible Playbook variables
+    fail:
+      msg: 'ERROR: Check user, proxy_host and proxy_port ansible variables (and/or environment variables passed to ansible-playbook: logname, proxyhost, proxyport) '
+    when: user is not defined or
+          user == 'xxx'
+
+# -----------------------------------
+#   Proxy configuration if needed
+# -----------------------------------
+  - name: Disable Ununtu Proxy setting
+    shell: |
+      su -l {{ user }} -s /usr/bin/gsettings set org.gnome.system.proxy mode 'none'
+      rm -f /etc/apt/apt.conf
+    when:
+      - proxy_host == ''
+      - proxy_port == ''
+    args:
+      warn: false
+
+  - name: Set Ununtu Proxy setting
+    shell: |
+      # Apply in Ubuntu Settings
+      su -l {{ user }} -s /usr/bin/gsettings set org.gnome.system.proxy mode 'manual'
+      su -l {{ user }} -s /usr/bin/gsettings set org.gnome.system.proxy.http host {{ proxy_host }}
+      su -l {{ user }} -s /usr/bin/gsettings set org.gnome.system.proxy.http port {{ proxy_port }}
+      su -l {{ user }} -s /usr/bin/gsettings set org.gnome.system.proxy.https host {{ proxy_host }}
+      su -l {{ user }} -s /usr/bin/gsettings set org.gnome.system.proxy.https port {{ proxy_port }}
+      su -l {{ user }} -s /usr/bin/gsettings set org.gnome.system.proxy.ftp host {{ proxy_host }}
+      su -l {{ user }} -s /usr/bin/gsettings set org.gnome.system.proxy.ftp port {{ proxy_port }}
+      su -l {{ user }} -s /usr/bin/gsettings set org.gnome.system.proxy.socks host {{ proxy_host }}
+      su -l {{ user }} -s /usr/bin/gsettings set org.gnome.system.proxy.socks port {{ proxy_port }}
+
+      # Apply System wide
+      if grep -q http_proxy /etc/environment; then
+         # Editing existing configuration
+         sed -i 's;http_proxy=.*;http_proxy={{ proxy_host }}:{{ proxy_port }};' /etc/environment
+      else
+         # Adding to the configuration
+         echo "http_proxy=http://{{ proxy_host }}:{{ proxy_port }}" >> /etc/environment
+      fi
+      if grep -q https_proxy /etc/environment; then
+         # Editing existing configuration
+         sed -i 's;https_proxy=.*;https_proxy={{ proxy_host }}:{{ proxy_port }};' /etc/environment
+      else
+         # Adding to the configuration
+         echo "https_proxy=http://{{ proxy_host }}:{{ proxy_port }}" >> /etc/environment
+      fi
+      if grep -q ftp_proxy /etc/environment; then
+         # Editing existing configuration
+         sed -i 's;ftp_proxy=.*;ftp_proxy={{ proxy_host }}:{{ proxy_port }};' /etc/environment
+      else
+         # Adding to the configuration
+         echo "ftp_proxy=http://{{ proxy_host }}:{{ proxy_port }}" >> /etc/environment
+      fi
+      if grep -q socks_proxy /etc/environment; then
+         # Editing existing configuration
+         sed -i 's;socks_proxy=.*;socks_proxy={{ proxy_host }}:{{ proxy_port }};' /etc/environment
+      else
+         # Adding to the configuration
+         echo "socks_proxy=http://{{ proxy_host }}:{{ proxy_port }}" >> /etc/environment
+      fi
+      netplan apply
+
+      # Apply to apt
+      echo "Acquire::http::proxy \"http://{{ proxy_host }}:{{ proxy_port }}\";" > /etc/apt/apt.conf
+      echo "Acquire::https::proxy \"http://{{ proxy_host }}:{{ proxy_port }}\";" >> /etc/apt/apt.conf
+      echo "Acquire::ftp::proxy \"http://{{ proxy_host }}:{{ proxy_port }}\";" >> /etc/apt/apt.conf
+      echo "Acquire::socks::proxy \"http://{{ proxy_host }}:{{ proxy_port }}\";" >> /etc/apt/apt.conf
+
+    ignore_errors: true
+    when:
+      - proxy_host != ''
+      - proxy_port != ''
+
+# -----------------------------------
+# Restore User's Home Configuration
+# like ".bashrc", ".git", ".config"...
+# Dev tools plug-ins and settings
+# -----------------------------------
+  - name: Restore Saved Configuration (if available)
+    shell: |
+      if [ -f "/home/{{ user }}/Bootstrap-AI-DevBox/PrivateConfiguration.tar.gz" ]; then
+        echo "Restoring User's Saved Configuration"
+        tar xvf /home/{{ user }}/Bootstrap-AI-DevBox/PrivateConfiguration.tar.gz -C /home/{{ user }}
+        if [ -f "/home/{{ user }}/usr/local/bin/charm" ]; then
+          mv /home/{{ user }}/usr/local/bin/charm /usr/local/bin/charm
+          rm -r /home/{{ user }}/usr
+        fi
+        if [ -f "/home/{{ user }}/etc/X11/xorg.conf" ]; then
+          mv /home/{{ user }}/etc/X11/xorg.conf /etc/X11/
+          rm -f /home/{{ user }}/etc
+        fi
+      fi
+      if [ -f "/home/{{ user }}/Bootstrap-AI-DevBox/fonts.tar.gz" ]; then
+        echo "Restoring Additional fonts"
+        tar xvf /home/{{ user }}/Bootstrap-AI-DevBox/fonts.tar.gz -C /usr/share/fonts/truetype/
+      fi
+    ignore_errors: true
+
+  - name: Make sure PATH environment variable is defined in .bashrc
+    shell: |
+      if ! grep -q PATH /home/{{ user }}/.bashrc; then
+        echo "Adding PATH environment variable in .bashrc..."
+        echo "PATH=$PATH" >> /home/{{ user }}/.bashrc
+      fi
+    ignore_errors: true
+# -----------------------------------
+#            Base Setup
+# -----------------------------------
+  - name: Disable Screen Saver
+    shell: |
+      su -l {{ user }} -s /usr/bin/gsettings set org.gnome.desktop.screensaver lock-enabled 'false'
+      su -l {{ user }} -s /usr/bin/gsettings set org.gnome.desktop.screensaver idle-activation-enabled 'false'
+      su -l {{ user }} -s /usr/bin/gsettings set org.gnome.desktop.session idle-delay '0'
+
+    ignore_errors: true
+    args:
+      warn: false
+
+  - name: System update (apt-update)
+    apt:
+      update_cache: 'yes'
+
+  - name: System upgrade (apt-upgrade)
+    apt:
+      upgrade: 'yes'
+
+  - name: Preliminary setup
+    apt:
+      name: 'apt-transport-https, ca-certificates, software-properties-common'
+      state: present
+
+  - name: Install Python 3
+    apt:
+      name: 'python3, python3-distutils, python3-pip, pylint'
+      state: present
+
+  - name: Check if vboxsf module is already loaded (ignore errors if any)
+    shell: 'lsmod | grep vboxsf'
+    register: vbox_mod_check
+    ignore_errors: true
+    no_log: true
+
+  - name: Check if VBox Guest Additions cdrom is available (ignore errors if any)
+    shell: 'cd /media/{{ user }}/VBox_GAs_*'
+    register: vbox_iso_check
+    ignore_errors: true
+    no_log: true
+
+  - name: Try to Install VBox Add-ons if needed (ignore errors if any)
+    shell: |
+      cd /media/{{ user }}/VBox_GAs_*
+      yes | /bin/bash ./VBoxLinuxAdditions.run
+      usermod -aG vboxsf {{ user }}
+      # Make sure to use default xorg.conf settings and not a restored backup
+      rm -f /etc/X11/xorg.conf
+    when:
+      - "'vboxsf' not in vbox_mod_check.stdout"
+      - vbox_iso_check is succeeded
+    ignore_errors: true
+
+  - name: Enable Firewall
+    ufw:
+      state: enabled
+      policy: deny
+
+  - name: Allow ssh
+    ufw:
+      rule: allow
+      port: ssh
+      proto: tcp
+      state: enabled
+
+  - name: Install openssh
+    apt:
+      name: 'openssh-client, openssh-server'
+      state: present
+
+  - name: Install Usefull app
+    apt:
+      name: 'curl, vim, htop, zsh, gparted, gawk, nemo, chromium-browser, vlc, conky-all, plymouth-themes'
+      state: present
+
+# -----------------------------------
+#      Development Tools Setup
+# -----------------------------------
+  - name: Install Development tools
+    apt:
+      name: 'build-essential, linux-headers-generic, git, pylint'
+      state: present
+
+  - name: Add Sublime Text 3 apt signing key
+    apt_key:
+      url: http://download.sublimetext.com/sublimehq-pub.gpg
+      state: present
+    when: install_sublime_text
+
+  - name: Add Sublime Text 3 repository into sources list
+    apt_repository:
+      repo: deb https://download.sublimetext.com/ apt/stable/
+      state: present
+      filename: 'sublime-text'
+      update_cache: yes
+    when: install_sublime_text
+
+  - name: Install Sublime Text 3
+    apt:
+      name: sublime-text, sublime-merge
+      state: present
+    when: install_sublime_text
+
+  - name: Add Sublime Text 3 to PATH
+    shell: |
+      if ! grep -q sublime /home/{{ user }}/.bashrc; then
+        echo "Adding Sublime Text 3 to PATH..."
+        sed -i 's;^PATH.*;PATH='"$PATH"':/opt/sublime_text/;' /home/{{ user }}/.bashrc
+      fi
+    when: install_sublime_text
+
+  - name: Add VS Code apt signing key
+    apt_key:
+      url: https://packages.microsoft.com/keys/microsoft.asc
+      state: present
+    when: install_vs_code
+
+  - name: Add VS Code repository into sources list
+    apt_repository:
+      repo: deb https://packages.microsoft.com/repos/vscode stable main
+      state: present
+      filename: 'vscode'
+      update_cache: yes
+    when: install_vs_code
+
+  - name: Install VS Code
+    apt:
+      name: code
+      state: present
+    when: install_vs_code
+
+  - name: Install PyCharm
+    shell: |
+      if [ -d "/opt/pycharm-{{ pycharm_version }}" ]; then
+        echo "pycharm-professional-{{ pycharm_version }} is already installed"
+      else
+        echo "Download PyCharm"
+        cd /tmp
+        wget -O pycharm-professional-{{ pycharm_version }}.tar.gz https://download.jetbrains.com/python/pycharm-professional-{{ pycharm_version }}.tar.gz
+        wget -O pycharm-professional-{{ pycharm_version }}.tar.gz.sha256 https://download.jetbrains.com/python/pycharm-professional-{{ pycharm_version }}.tar.gz.sha256
+        if ! sha256sum -c --status pycharm-professional-{{ pycharm_version }}.tar.gz.sha256 ; then
+          echo "Checksum failed for PyCharm"
+          exit 1
+        else
+          echo "Installing PyCharm..."
+          tar -C /opt/ -xvf pycharm-professional-{{ pycharm_version }}.tar.gz
+          chown -R $(logname):$(logname) /opt/pycharm-{{ pycharm_version }}
+          if ! grep -q pycharm /home/{{ user }}/.bashrc; then
+            echo "Adding PyCharm to PATH..."
+            sed -i 's;^PATH.*;PATH='"$PATH"':/opt/pycharm-"{{ pycharm_version }}"/bin;' /home/{{ user }}/.bashrc
+          fi
+          # Fix Pycharm Shortcut
+          if [ -f /home/{{ user }}/.local/share/applications/jetbrains-pycharm.desktop ] ; then
+              echo "Fixing Pycharm Shortcut"
+              sed -i -e 's;Icon=.*;Icon=/opt/pycharm-{{ pycharm_version }}/bin/pycharm.png;' /home/{{ user }}/.local/share/applications/jetbrains-pycharm.desktop
+              cp -f /home/{{ user }}/.local/share/applications/jetbrains-pycharm.desktop /usr/share/applications/
+          fi
+        fi
+        cd $OLDPATH
+      fi
+    when: install_pycharm_pro
+
+  - name: Install Install conda apt signing key
+    apt_key:
+      url: https://repo.anaconda.com/pkgs/misc/gpgkeys/anaconda.asc
+      state: present
+
+  - name: Add conda repository into sources list
+    apt_repository:
+      repo: deb https://repo.anaconda.com/pkgs/misc/debrepo/conda stable main
+      state: present
+      filename: 'conda'
+      update_cache: yes
+    when: install_conda
+
+  - name: Install Conda
+    apt:
+      name: conda
+      state: present
+    when: install_conda
+
+  - name: Patch conda (fix 'Maximum Recursion Error')
+    shell: |
+      conda_dirname=`conda -V | sed  -e "s/conda /conda-/g"`
+      conda_files=`find /opt/conda -type f -name "download.py" -print | grep "conda\/gateways"`
+      for f in $conda_files
+      do
+        if ! grep -q "sys.setrecursionlimit(100000)" $f ; then
+          printf "[PATCH] Applying patch to avoid 'Maximum Recursion Error' in \n $f \n"
+          sudo sed -i -e 's/import sys/import sys\nsys.setrecursionlimit(100000)/g' $f   # ** PATCH **
+        else
+          printf "[INFO] Patch to avoid 'Maximum Recursion Error' is already present in \n $f \n"
+        fi
+      done
+    when: install_conda
+
+  - name: Create a conda Environment
+    shell: |
+      if ! [ -d " /opt/conda/envs/{{ conda_env_name }}" ]; then
+        echo "[CONDA] Creating Python {{ conda_python_version }} virtual environment named {{ conda_env_name }}"
+        sudo conda create -q -y -n {{ conda_env_name }} python={{ conda_python_version }} {{ conda_packages }}
+      else
+        echo "[INFO] Virtual environment {{ conda_env_name }} is already present."
+      fi
+      if ! grep -q conda /home/{{ user }}/.bashrc; then
+            echo "Adding conda to PATH..."
+            sed -i 's;^PATH.*;PATH='"$PATH"':/opt/conda/bin;' /home/{{ user }}/.bashrc
+      fi
+      if ! grep -q activate /home/{{ user }}/.bashrc ; then
+        printf "\n#source activate {{ conda_env_name }}\n" >> /home/{{ user }}/.bashrc
+      fi
+    when: install_conda
+
+  - name: Install pypy
+    shell: |
+      export PYPY=$(echo '{{ pypy_file }}' | sed -e 's/.tar.bz2//g')
+      echo {{ pypy_sha256 }} > ./{{ pypy_file }}.sha256
+      wget -O {{ pypy_file }} {{ pypy_base_url }}/{{ pypy_file }}
+      if ! sha256sum -c --status ./{{ pypy_file }}.sha256 ; then
+          echo "Checksum failed for {{ pypy_file }}"
+          exit 1
+      else
+          echo "Installing pypy..."
+          tar -C /opt/ -xvf {{ pypy_file }}
+          chown -R $(logname):$(logname) /opt/$PYPY
+          if ! grep -q pypy /home/$(logname)/.bashrc; then
+              echo "Adding pypy to path..."
+              echo "PATH=$PATH:/opt/$PYPY/bin" >> /home/$(logname)/.bashrc
+          fi
+      fi
+    when: install_pypy
+
+# -----------------------------------
+#     Unity Window Manager Setup
+# -----------------------------------
+  - name: Install Unity window manager (alternative to Gnome)
+    apt:
+      name: 'ubuntu-unity-desktop,  unity-tweak-tool'
+      state: present
+      dpkg_options: 'force-confnew'
+
+  - name: Change Display Manager from gdm3 (Gnome) to lightdm (Unity)
+    shell: |
+       sudo sh -c 'echo "/usr/sbin/lightdm" > /etc/X11/default-display-manager'
+       sudo sh -c 'DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true dpkg-reconfigure lightdm'
+       sudo sh -c 'echo set shared/default-x-display-manager lightdm | debconf-communicate'
+    args:
+      warn: false
+
+  - name: Remove Gnome window manager
+    apt:
+      name: 'ubuntu-gnome-desktop, gnome-shell, gnome-tweak-tool'
+      autoremove: yes
+      state: absent
+
+  - name: Install compizconfig tool to manage Unity/Gnome settings
+    apt:
+      name: compizconfig-settings-manager
+      state: present
+
+  - name: Customize Unity Configuration
+    shell: |
+      # Customize the Unity Launcher
+      su -l {{ user }} -s /usr/bin/gsettings set com.canonical.Unity.Launcher favorites "['application://nemo.desktop', 'application://org.gnome.Terminal.desktop', 'application://chromium-browser.desktop', 'application://sublime_text.desktop', 'application://jetbrains-pycharm.desktop', 'application://code.desktop', 'application://gnome-system-monitor.desktop', 'application://nvidia-settings.desktop', 'application://unity-control-center.desktop']"
+
+      # Customize GUI Settings
+      su -l {{ user }} -s /usr/bin/dconf write /org/compiz/profiles/unity/plugins/core/active-plugins "['core', 'composite', 'opengl', 'place', 'regex', 'resize', 'session', 'snap', 'vpswitch', 'wall', 'animation', 'compiztoolbox', 'fade', 'imgpng', 'mousepoll', 'move', 'scale', 'workarounds', 'expo', 'ezoom', 'switcher', 'unityshell']"
+      su -l {{ user }} -s /usr/bin/dconf reset /org/compiz/profiles/unity/plugins/core/show-desktop-edge
+      su -l {{ user }} -s /usr/bin/dconf reset /org/compiz/profiles/unity/plugins/expo/expo-edge
+      su -l {{ user }} -s /usr/bin/dconf reset /org/compiz/profiles/unity/plugins/scale/initiate-edge
+      su -l {{ user }} -s /usr/bin/dconf reset /org/compiz/profiles/unity/plugins/scale/initiate-all-edge
+      su -l {{ user }} -s /usr/bin/gsettings set com.canonical.Unity always-show-menus true
+      su -l {{ user }} -s /usr/bin/gsettings set com.canonical.Unity integrated-menus true
+      su -l {{ user }} -s /usr/bin/gsettings set com.canonical.Unity.Lenses remote-content-search 'none'
+      su -l {{ user }} -s /usr/bin/gsettings set com.canonical.Unity lowgfx false
+      su -l {{ user }} -s /usr/bin/gsettings set com.ubuntu.user-interface scale-factor "{'HDMI-0': 6}"
+      su -l {{ user }} -s /usr/bin/gsettings set org.compiz.unityshell:/org/compiz/profiles/unity/plugins/unityshell/ icon-size 36
+      su -l {{ user }} -s /usr/bin/gsettings set org.compiz.unityshell:/org/compiz/profiles/unity/plugins/unityshell/ launcher-capture-mouse false
+
+      # Disable Screensaver & Screelock
+      su -l {{ user }} -s /usr/bin/gsettings set org.gnome.desktop.lockdown disable-lock-screen false
+      su -l {{ user }} -s /usr/bin/gsettings set org.gnome.desktop.privacy report-technical-problems false
+      su -l {{ user }} -s /usr/bin/gsettings set org.gnome.desktop.privacy send-software-usage-stats false
+      su -l {{ user }} -s /usr/bin/gsettings set org.gnome.desktop.session idle-delay 0
+      su -l {{ user }} -s /usr/bin/gsettings set org.gnome.desktop.screensaver lock-enabled 'false'
+      su -l {{ user }} -s /usr/bin/gsettings set org.gnome.desktop.screensaver idle-activation-enabled 'false'
+
+      # Set Default File Manager
+      su -l {{ user }} -s /usr/bin/xdg-mime default nemo.desktop inode/directory
+
+      # Set Default Browser
+      su -l {{ user }} -s /usr/bin/xdg-settings set default-web-browser chromium-browser.desktop
+
+      if [ "{{ install_sublime_text }}" ] ; then
+        su -l {{ user }} -s cp /usr/share/applications/defaults.list  /usr/share/applications/defaults.list.bck
+        su -l {{ user }} -s sed -i 's/gedit/sublime_text/g' /usr/share/applications/defaults.list
+      fi
+
+      # Customize Terminal Keybindings
+      su -l {{ user }} -s /usr/bin/gsettings set org.gnome.Terminal.Legacy.Keybindings:/org/gnome/terminal/legacy/keybindings/ reset-and-clear '<Primary>l'
+      su -l {{ user }} -s /usr/bin/gsettings set org.gnome.Terminal.Legacy.Keybindings:/org/gnome/terminal/legacy/keybindings/ paste '<Primary>v'
+      su -l {{ user }} -s /usr/bin/gsettings set org.gnome.Terminal.Legacy.Keybindings:/org/gnome/terminal/legacy/keybindings/ new-tab '<Primary>t'
+      su -l {{ user }} -s /usr/bin/gsettings set org.gnome.Terminal.Legacy.Keybindings:/org/gnome/terminal/legacy/keybindings/ new-window '<Primary>n'
+      su -l {{ user }} -s /usr/bin/gsettings set org.gnome.Terminal.Legacy.Keybindings:/org/gnome/terminal/legacy/keybindings/ close-tab '<Primary>w'
+      su -l {{ user }} -s /usr/bin/gsettings set org.gnome.Terminal.Legacy.Keybindings:/org/gnome/terminal/legacy/keybindings/ find '<Primary>f'
+      su -l {{ user }} -s /usr/bin/gsettings set org.gnome.Terminal.Legacy.Keybindings:/org/gnome/terminal/legacy/keybindings/ find-next '<Primary>g'
+      su -l {{ user }} -s /usr/bin/gsettings set org.gnome.Terminal.Legacy.Keybindings:/org/gnome/terminal/legacy/keybindings/ find-previous '<Primary>h'
+      su -l {{ user }} -s /usr/bin/gsettings set org.gnome.settings-daemon.plugins.media-keys terminal 'twosuperior'
+    ignore_errors: true
+
+  - name: Customize Unity Look and Feel
+    shell: |
+      # Customize Wallpapers
+      if [ -f "$(ls -A '/home/{{ user }}/Pictures/{{ custom_wallpaper }}')" ]; then
+        su -l {{ user }} -s /usr/bin/gsettings set org.gnome.desktop.background picture-uri file:////home/{{ user }}/Pictures/{{ custom_wallpaper }}
+        su -l {{ user }} -s /usr/bin/gsettings set org.gnome.desktop.screensaver picture-uri file:////home/{{ user }}/Pictures/{{ custom_wallpaper }}
+        # Hijack main Ubuntu background pictures to customize the login screen background
+        cp /home/{{ user }}/Pictures/{{ custom_wallpaper }} /usr/share/backgrounds/
+        mv /usr/share/backgrounds/warty-final-ubuntu.png /usr/share/backgrounds/warty-final-ubuntu.png.orig
+        ln -s /usr/share/backgrounds/{{ custom_wallpaper }} /usr/share/backgrounds/warty-final-ubuntu.png
+      fi
+
+      # Customize Fonts
+      if [ -f "/usr/share/fonts/truetype/Andale/Andale_Mono.ttf" ]; then
+        su -l {{ user }} -s /usr/bin/gsettings set org.gnome.desktop.interface font-name 'Andale Mono 11'
+      else
+        su -l {{ user }} -s /usr/bin/gsettings set org.gnome.desktop.interface font-name 'Ubuntu 11'
+      fi
+      if [ -f /usr/share/fonts/truetype/Menlo/Menlo-Regular-01.ttf ]; then
+        su -l {{ user }} -s /usr/bin/gsettings set org.gnome.desktop.interface monospace-font-name 'Menlo 11'
+      else
+        su -l {{ user }} -s /usr/bin/gsettings set org.gnome.desktop.interface monospace-font-name 'Ubuntu Mono 11'
+      fi
+      su -l {{ user }} -s /usr/bin/gsettings set org.gnome.desktop.interface document-font-name 'Sans 11'
+      su -l {{ user }} -s /usr/bin/gsettings set org.gnome.desktop.interface titlebar-font 'Ubuntu 11'
+
+      # Customize Terminal (Default Profile)
+      profile=$(/usr/bin/gsettings get org.gnome.Terminal.ProfilesList default | sed -e "s/'//g")
+      su -l {{ user }} -s /usr/bin/gsettings  set "org.gnome.Terminal.Legacy.Profile:/org/gnome/terminal/legacy/profiles:/:$profile/" default-size-columns 120
+      su -l {{ user }} -s /usr/bin/gsettings  set "org.gnome.Terminal.Legacy.Profile:/org/gnome/terminal/legacy/profiles:/:$profile/" default-size-rows 40
+      su -l {{ user }} -s /usr/bin/gsettings  set "org.gnome.Terminal.Legacy.Profile:/org/gnome/terminal/legacy/profiles:/:$profile/" use-theme-colors false
+      su -l {{ user }} -s /usr/bin/gsettings  set "org.gnome.Terminal.Legacy.Profile:/org/gnome/terminal/legacy/profiles:/:$profile/" foreground-color 'rgb(211,215,207)'
+      su -l {{ user }} -s /usr/bin/gsettings  set "org.gnome.Terminal.Legacy.Profile:/org/gnome/terminal/legacy/profiles:/:$profile/" background-color 'rgb(46,52,54)'
+      su -l {{ user }} -s /usr/bin/gsettings  set "org.gnome.Terminal.Legacy.Profile:/org/gnome/terminal/legacy/profiles:/:$profile/" use-theme-transparency false
+      su -l {{ user }} -s /usr/bin/gsettings  set "org.gnome.Terminal.Legacy.Profile:/org/gnome/terminal/legacy/profiles:/:$profile/" use-transparent-background true
+      su -l {{ user }} -s /usr/bin/gsettings  set "org.gnome.Terminal.Legacy.Profile:/org/gnome/terminal/legacy/profiles:/:$profile/" background-transparency-percent 10
+      su -l {{ user }} -s /usr/bin/gsettings  set "org.gnome.Terminal.Legacy.Profile:/org/gnome/terminal/legacy/profiles:/:$profile/" palette "['rgb(46,52,54)', 'rgb(204,0,0)', 'rgb(78,154,6)', 'rgb(196,160,0)', 'rgb(52,101,164)', 'rgb(117,80,123)', 'rgb(6,152,154)', 'rgb(211,215,207)', 'rgb(85,87,83)', 'rgb(239,41,41)', 'rgb(138,226,52)', 'rgb(252,233,79)', 'rgb(114,159,207)', 'rgb(173,127,168)', 'rgb(52,226,226)', 'rgb(238,238,236)']"
+    ignore_errors: true
+    when: customize_congfiguration
+
+# -----------------------------------
+#     Remove unnecessary apps
+# -----------------------------------
+  - name: Remove Games and Amazon apps installed via apt
+    apt:
+      name: 'unity-lens-shopping, unity-webapps-common, gnome-games-common, \
+             gnome-mines, gnome-mahjongg, aisleriot, gnome-sudoku \
+             ubuntu-report, popularity-contest, apport, whoopsie'
+      autoremove: yes
+      state: absent
+
+  - name: Remove unnecessary Ubuntu apps installed via apt
+    apt:
+      name: 'xterm, onboard,thunderbird, thunderbird-gnome-support, transmission-common, \
+             transmission-gtk, simple-scan, cheese, shotwell, unity-lens-photos, gnome-calendar'
+      autoremove: yes
+      state: absent
+
+  - name: Remove unnecessary Ubuntu Gnome apps installed via snap
+    snap:
+      name: 'gtk-common-themes, gnome-calculator, gnome-characters, gnome-logs, gnome-system-monitor'
+      state: absent
+    ignore_errors: true
+
+  - name: Remove Snap's Snapshots (ignore errors if any)
+    shell: "snap forget {{ item }}"
+    with_items:
+      - "{{ 1 }}"
+      - "{{ 2 }}"
+      - "{{ 3 }}"
+      - "{{ 4 }}"
+      - "{{ 5 }}"
+    ignore_errors: true
+    no_log: true
+
+
+# -----------------------------------
+#    Setup Nvidia GPU (If needed)
+# -----------------------------------
+
+  - name: Detect Nvidia GPU
+    shell: 'lspci | grep -i nvidia'
+    register: gpu_check
+    ignore_errors: true
+
+  - name: Remove ppa
+    apt_repository:
+      repo: ppa:graphics-drivers/ppa
+      state: absent
+    when: gpu_check.stdout.find('NVIDIA') != -1
+
+  - name: Add NVIDIA apt signing key
+    apt_key:
+      url: http://developer.download.nvidia.com/compute/cuda/repos/ubuntu1804/x86_64/7fa2af80.pub
+      state: present
+    when: gpu_check.stdout.find('NVIDIA') != -1
+
+  - name: Setup cuda apt preferences
+    shell: |
+      cat <<EOF | sudo tee /etc/apt/preferences.d/cuda > /dev/null
+      Package: *
+      Pin: origin developer.download.nvidia.com
+      Pin-Priority: 600
+      EOF
+
+  - name: Add NVIDIA/CUDA repository into sources list
+    apt_repository:
+      repo: deb https://developer.download.nvidia.com/compute/cuda/repos/ubuntu1804/x86_64 /
+      state: present
+      filename: 'cuda'
+      update_cache: yes
+    when: gpu_check.stdout.find('NVIDIA') != -1
+
+  - name: Remove Nouveau
+    apt:
+      name: "xserver-xorg-video-nouveau"
+      autoremove: yes
+      state: absent
+    when: gpu_check.stdout.find('NVIDIA') != -1
+
+### Fix : Force Nvidia drivers install in Ubuntu Bionics
+  - name: Force Install of NVIDIA drivers in Ubuntu 18
+    shell: |
+      if ! [ -e /usr/lib/x86_64-linux-gnu/libGLX_indirect.so.0.bck ]; then
+         cp /usr/lib/x86_64-linux-gnu/libGLX_indirect.so.0 /usr/lib/x86_64-linux-gnu/libGLX_indirect.so.0.bck
+      fi
+      apt-get -o Dpkg::Options::="--force-overwrite" --fix-missing install cuda-drivers
+      apt-get -y --fix-broken install
+      ubuntu-drivers autoinstall
+      apt-get -y install nvidia-modprobe nvidia-settings
+      if ! [ -f "/home/{{ user }}/etc/X11/xorg.conf" ]; then
+        nvidia-xconfig
+      fi
+     # Tips: Use the following command to repair the system in case of failure
+     # sudo dpkg -r cuda-drivers nvidia-xxx-dev # Adjust version number
+     # sudo apt-get --fix-broken install
+    when: gpu_check.stdout.find('NVIDIA') != -1
+
+
+  # - name: Add NVIDIA/TensorRT repository into sources list
+  #   apt_repository:
+  #     repo: deb https://developer.download.nvidia.com/compute/machine-learning/repos/ubuntu1804/x86_64/
+  #     state: present
+  #     filename: 'tensorrt'
+  #     update_cache: yes
+  #   when: gpu_check.stdout.find('NVIDIA') != -1
+
+  # - name: Install NVIDIA TensorRT
+  #   apt:
+  #     name: 'nvidia-machine-learning-repo-ubuntu1804, python3-libnvinfer'
+  #     state: present
+  #     update_cache: yes
+  #   when: gpu_check.stdout.find('NVIDIA') != -1
+
+# -----------------------------------
+#   Setup Docker and Nvidia Docker
+# -----------------------------------
+  - name: Add Docker apt signing key
+    shell:
+      curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+    args:
+      warn: false
+
+  - name: Add Docker repository into sources list
+    apt_repository:
+      repo: deb https://download.docker.com/linux/ubuntu xenial stable
+      state: present
+      filename: 'docker'
+      update_cache: yes
+
+  - name: Install Docker CE
+    apt:
+      name: docker-ce
+      state: present
+      update_cache: yes
+
+  - name: Add nvidia-docker apt signing key
+    shell:
+      curl -s -L https://nvidia.github.io/nvidia-docker/gpgkey | sudo apt-key add -
+    when: gpu_check.stdout.find('NVIDIA') != -1
+    args:
+      warn: false
+
+  - name: Add nvidia-docker repository into sources list
+    shell:
+      curl -s -L https://nvidia.github.io/nvidia-docker/ubuntu16.04/amd64/nvidia-docker.list | sudo tee /etc/apt/sources.list.d/nvidia-docker.list
+    when: gpu_check.stdout.find('NVIDIA') != -1
+    args:
+      warn: false
+
+  - name: Install nvidia-docker utility engine 2
+    apt:
+      name: nvidia-docker2
+      state: present
+      update_cache: yes
+      install_recommends: yes
+    when: gpu_check.stdout.find('NVIDIA') != -1
+
+  - name: Setup Docker
+    shell: |
+      if ! grep -q DOCKER_HOST /home/{{ user }}/.bashrc ; then
+        echo "export DOCKER_HOST=tcp://127.0.0.1:2375" >> .bashrc
+      fi
+      mkdir -p /etc/systemd/system/docker.service.d/
+      cat <<EOF | sudo tee /etc/systemd/system/docker.service.d/override.conf > /dev/null
+      [Service]
+      ExecStart=
+      ExecStart=/usr/bin/dockerd --default-shm-size="1G" --host=fd:// --host tcp://127.0.0.1:2375 --storage-driver=overlay2
+      LimitMEMLOCK=infinity
+      LimitSTACK=67108864
+    args:
+      warn: false
+
+  - name: Setup Docker Proxy
+    shell: |
+      echo Environment="HTTP_PROXY=http://{{ proxy_host }}:{{ proxy_port}}/" "HTTPS_PROXY=http://{{ proxy_host }}:{{ proxy_port }}/" "NO_PROXY=localhost,127.0.0.1 " >> /etc/systemd/system/docker.service.d/override.conf
+    ignore_errors: true
+    when:
+      - proxy_host != ''
+      - proxy_port != ''
+
+  - name: Start Docker service automatically
+    systemd:
+      name: docker
+      enabled: yes
+      state: restarted
+
+  - name: Add docker group to user
+    shell: usermod -aG docker {{ user }}
+
+  - name: Install Nvidia NGC CLI
+    shell: |
+      mkdir -p /opt/ngc
+      wget -O /opt/ngc/ngccli_reg_linux.zip https://ngc.nvidia.com/downloads/ngccli_reg_linux.zip
+      unzip -o /opt/ngc/ngccli_reg_linux.zip
+      rm /opt/ngc/ngccli_reg_linux.zip
+
+      if ! md5sum -c --status ngc.md5 ; then
+        echo "Checksum failed for ngc"
+        chmod u-x /opt/ngc/ngc
+        exit 1
+      else
+        echo "Configuring ngc..."
+        chmod u+x /opt/ngc/ngc
+        chown -R $(logname):$(logname) /opt/ngc
+        if ! grep -q ngc /home/$(logname)/.bashrc; then
+           echo "Adding ngc to path..."
+           sed -i 's;^PATH.*;PATH='"$PATH"':/opt/ngc;' /home/{{ user }}/.bashrc
+        fi
+      fi
+    when: gpu_check.stdout.find('NVIDIA') != -1
+    args:
+      warn: false
+
+# -----------------------------------
+#          Clean the system
+# -----------------------------------
+
+  - name: Remove dependencies that are no longer required
+    apt:
+      autoremove: yes
+
+  - name: Clean dependencies that are no longer be downloaded
+    apt:
+      autoclean: yes
+
+  - name: Purge configuration files for absent modules
+    apt:
+      purge: yes
+
+  - name: Start the GUI by default
+    shell: |
+      systemctl set-default graphical.target
+
+  - name: Customize .bashrc (Flush bash history after each command)
+    shell: |
+      if ! grep -q PROMPT_COMMAND /home/{{ user }}/.bashrc ; then
+         sed -i -e 's/HISTCONTROL=ignoreboth/HISTCONTROL=ignoreboth\n#Flush bash history after each command\nPROMPT_COMMAND="history -a ; history -r"\n/g' /home/{{ user }}/.bashrc
+      fi
+    args:
+      warn: false
+
+  - name: Repair permissions
+    shell: |
+      chown -R {{ user }}:{{ user }} /home/{{ user }}
+      chown -R {{ user }}:{{ user }} /opt
+    args:
+      warn: false
+
+  - name: Clean the logs
+    shell: |
+      rm -rf /var/log/*
+      rm -rf /tmp/.[!.]* /tmp/*
+    ignore_errors: true
+    args:
+      warn: false
+
+  - name: Reboot the server
+    shell: shutdown -r now
